@@ -61,13 +61,13 @@ handleOAuthLogin
   -> (oauthIdRow -> Int64)  -- ^ Extract account ID from OAuth ID row
   -> (Id Account -> ReaderT cfg m ())  -- ^ Insert new OAuth ID for account
   -> R frontendRoute  -- ^ Where to redirect after success
-  -> ReaderT cfg m ()
+  -> ReaderT cfg m (Id Account)
 handleOAuthLogin emailStr maybeOAuthID extractAccountId insertOAuthId redirectToRoute = do
   -- Validate email format
   case EmailValidate.validate (T.encodeUtf8 $ T.pack emailStr) of
     Left _err -> error $ "Invalid email format from OAuth provider: " <> emailStr
     Right _validEmail -> do
-      case maybeOAuthID of
+      accountID' <- case maybeOAuthID of
         Nothing -> do
           -- New user signup or link to existing account
           (acctsTbl :: PgTable Postgres db Account) <- asksTableM
@@ -75,7 +75,7 @@ handleOAuthLogin emailStr maybeOAuthID extractAccountId insertOAuthId redirectTo
           -- Check if account with this email already exists
           maybeExistingAcct <- withDbEnv $ getUserByEmail acctsTbl (T.pack emailStr)
           liftIO $ print $ isJust maybeExistingAcct
-          accountID' <- case maybeExistingAcct of
+          case maybeExistingAcct of
             -- Link to existing account
             Just existingAcct -> do
               let existingAccountId = pk existingAcct
@@ -93,12 +93,12 @@ handleOAuthLogin emailStr maybeOAuthID extractAccountId insertOAuthId redirectTo
                   withDbEnv $ putNewUserType uTypeTbl aid Nothing
                   pure aid
 
-          setCookiesAndRedirect @db @beR accountID' redirectToRoute
-
         Just oauthIdRow -> do
           -- Existing user login
-          let accountID' = AccountId $ SqlSerial $ extractAccountId oauthIdRow
-          setCookiesAndRedirect @db @beR accountID' redirectToRoute
+          pure $ AccountId $ SqlSerial $ extractAccountId oauthIdRow
+
+      setCookiesAndRedirect @db @beR accountID' redirectToRoute
+      pure accountID'
 
 -- | Helper function to set both auth and user type cookies after OAuth login
 setCookiesAndRedirect
@@ -172,7 +172,7 @@ oauthHandler
   -> beR (R OAuth)
   -> R frontendRoute
   -> R frontendRoute
-  -> ReaderT cfg m ()
+  -> ReaderT cfg m (Maybe (Id Account, T.Text))
 oauthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case oauthRoute of
   OAuth_RedirectUri :/ redirectParams -> case redirectParams of
     Nothing -> liftIO $ error "Expected to receive the authorization code here"
@@ -185,7 +185,6 @@ oauthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case 
             , _tokenRequest_clientId = clientId
             , _tokenRequest_clientSecret = clientSecret
             , _tokenRequest_redirectUri = (\x -> oAuthRedirectGADT :/ x)
-            -- BackendRoute_OAuth
             }
           oAuthUrl = "https://github.com/login/oauth/access_token"
       tlsMgr <- liftIO $ Http.newManager tlsManagerSettings
@@ -196,11 +195,11 @@ oauthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case 
       rsp <- liftIO $ flip Http.httpLbs tlsMgr (req { Http.requestHeaders = Http.requestHeaders req
                                                       <> [(Http.hAccept, "application/json")] }
                                                )
-      -- this response should include the access token and probably a refresh token
       let accessToken = fmap access_token . Aeson.decode . Http.responseBody $ rsp
       case accessToken of
-        Nothing -> frontendRedirect @beR redirectNoAuth
-        --redirectroute' $ FrontendRoute_Main :/ ()
+        Nothing -> do
+          frontendRedirect @beR redirectNoAuth
+          pure Nothing
         Just aToken -> do
           reqUser <- liftIO $ Http.parseRequest "https://api.github.com/user"
           let reqUser' = reqUser { Http.requestHeaders = Http.requestHeaders reqUser <>
@@ -210,15 +209,12 @@ oauthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case 
                                  }
           res <- liftIO $ flip Http.httpLbs tlsMgr reqUser'
           let userGithub :: Maybe GitHubUser = Aeson.decode . Http.responseBody $ res
-          -- they either exist in the database and are logging in or dont exist in the database and are a new user
           case userGithub of
             Nothing -> error "this is likely a bug or you do not have a github account"
             Just userGH -> do
-              -- Get email from user object, or fetch from /user/emails if not public
               ghEmail <- case _githubUser_github_email userGH of
                 Just email -> pure email
                 Nothing -> do
-                  -- Fetch emails from /user/emails endpoint
                   reqEmails <- liftIO $ Http.parseRequest "https://api.github.com/user/emails"
                   let reqEmails' = reqEmails { Http.requestHeaders = Http.requestHeaders reqEmails <>
                                               [ (Http.hAuthorization, "Bearer " <> (T.encodeUtf8 aToken))
@@ -227,25 +223,26 @@ oauthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case 
                                             }
                   resEmails <- liftIO $ flip Http.httpLbs tlsMgr reqEmails'
                   let emails = Aeson.decode . Http.responseBody $ resEmails :: Maybe [GitHubEmail]
-                  -- Find primary verified email
                   case emails of
                     Just emailList -> do
                       let primaryEmail = find (\e -> _githubEmail_primary e && _githubEmail_verified e) emailList
                       case primaryEmail of
                         Just e -> pure $ _githubEmail_email e
-                        Nothing -> pure $ _githubUser_login userGH -- fallback to username
-                    Nothing -> pure $ _githubUser_login userGH -- fallback to username
+                        Nothing -> pure $ _githubUser_login userGH
+                    Nothing -> pure $ _githubUser_login userGH
 
               (ghTbl :: PgTable Postgres db GithubID) <- asksTableM
               maybeGitID <- withDbEnv $ getGithubUserIfTheyExist ghTbl userGH
 
               liftIO $ putStrLn ghEmail
-              handleOAuthLogin @db @beR
+              let ghDisplayName = T.pack $ fromMaybe (_githubUser_login userGH) (_githubUser_name userGH)
+              acctId <- handleOAuthLogin @db @beR
                 ghEmail
                 maybeGitID
                 (\(GithubID _ghid uid) -> uid)
                 (\aid -> withDbEnv $ insertNewGithubID ghTbl userGH aid)
                 redirectToRoute
+              pure $ Just (acctId, ghDisplayName)
 
 -- | Google OAuth handler
 googleOAuthHandler
@@ -269,7 +266,7 @@ googleOAuthHandler
   -> beR (R OAuth)
   -> R frontendRoute
   -> R frontendRoute
-  -> ReaderT cfg m ()
+  -> ReaderT cfg m (Maybe (Id Account, T.Text))
 googleOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case oauthRoute of
   OAuth_RedirectUri :/ redirectParams -> case redirectParams of
     Nothing -> liftIO $ error "Expected to receive the authorization code here"
@@ -294,7 +291,9 @@ googleOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth =
                                                )
       let accessToken = fmap access_token . Aeson.decode . Http.responseBody $ rsp
       case accessToken of
-        Nothing -> frontendRedirect @beR redirectNoAuth
+        Nothing -> do
+          frontendRedirect @beR redirectNoAuth
+          pure Nothing
         Just aToken -> do
           reqUser <- liftIO $ Http.parseRequest "https://www.googleapis.com/oauth2/v2/userinfo"
           let reqUser' = reqUser { Http.requestHeaders = Http.requestHeaders reqUser <>
@@ -310,12 +309,14 @@ googleOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth =
               maybeGoogleID <- withDbEnv $ getGoogleUserIfTheyExist googleTbl userG
 
               let googleEmail = _googleUser_email userG
-              handleOAuthLogin @db @beR
+                  googleDisplayName = T.pack $ fromMaybe (takeWhile (/= '@') googleEmail) (_googleUser_name userG)
+              acctId <- handleOAuthLogin @db @beR
                 googleEmail
                 maybeGoogleID
                 (\(GoogleID _gid uid) -> uid)
                 (\aid -> withDbEnv $ insertNewGoogleID googleTbl userG aid)
                 redirectToRoute
+              pure $ Just (acctId, googleDisplayName)
 
 -- | Discord OAuth handler
 discordOAuthHandler
@@ -339,7 +340,7 @@ discordOAuthHandler
   -> beR (R OAuth)
   -> R frontendRoute
   -> R frontendRoute
-  -> ReaderT cfg m ()
+  -> ReaderT cfg m (Maybe (Id Account, T.Text))
 discordOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case oauthRoute of
   OAuth_RedirectUri :/ redirectParams -> case redirectParams of
     Nothing -> liftIO $ error "Expected to receive the authorization code here"
@@ -364,7 +365,9 @@ discordOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth 
                                                )
       let accessToken = fmap access_token . Aeson.decode . Http.responseBody $ rsp
       case accessToken of
-        Nothing -> frontendRedirect @beR redirectNoAuth
+        Nothing -> do
+          frontendRedirect @beR redirectNoAuth
+          pure Nothing
         Just aToken -> do
           reqUser <- liftIO $ Http.parseRequest "https://discord.com/api/users/@me"
           let reqUser' = reqUser { Http.requestHeaders = Http.requestHeaders reqUser <>
@@ -380,9 +383,11 @@ discordOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth 
               maybeDiscordID <- withDbEnv $ getDiscordUserIfTheyExist discordTbl userD
 
               let discordEmail = fromMaybe (_discordUser_username userD) $ _discordUser_email userD
-              handleOAuthLogin @db @beR
+                  discordDisplayName = T.pack $ _discordUser_username userD
+              acctId <- handleOAuthLogin @db @beR
                 discordEmail
                 maybeDiscordID
                 (\(DiscordID _did uid) -> uid)
                 (\aid -> withDbEnv $ insertNewDiscordID discordTbl userD aid)
                 redirectToRoute
+              pure $ Just (acctId, discordDisplayName)
