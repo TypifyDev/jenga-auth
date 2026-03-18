@@ -26,8 +26,9 @@ timer start stop reset = do
     , Nothing <$ stop
     , Nothing <$ reset
     ]
-  buildTime <- liftIO getCurrentTime
-  tick <- tickLossy 0.1 buildTime
+  -- Single ticker: only seed from the FIRST start event to avoid accumulation
+  firstStart <- headE startTimeEv
+  tick <- tickLossyFrom' $ (0.1,) <$> firstStart
   let elapsed = attachWith (\mStart tickInfo ->
         case mStart of
           Nothing -> 0
