@@ -20,14 +20,20 @@ timer :: ( PerformEvent t m
       -> Event t ()
       -> m (Dynamic t NominalDiffTime)
 timer start stop reset = do
-  start' <- countTimeFrom 0.01 start
-  timeEvent <- switchHold ((Just 0) <$ start) $ leftmost
-    [ (Just <$> start') <$ start
-    , ((Just 0 <$ never) <$ stop)
-    , (Just 0 <$ never) <$ reset
+  startTimeEv <- performEvent $ liftIO getCurrentTime <$ start
+  mStartTime <- holdDyn Nothing $ leftmost
+    [ Just <$> startTimeEv
+    , Nothing <$ stop
+    , Nothing <$ reset
     ]
-  timeDyn <- foldDyn (\newTime _ -> maybe 0 id newTime) 0 $ leftmost [ timeEvent, Nothing <$ reset ]
-  pure timeDyn
+  buildTime <- liftIO getCurrentTime
+  tick <- tickLossy 0.1 buildTime
+  let elapsed = attachWith (\mStart tickInfo ->
+        case mStart of
+          Nothing -> 0
+          Just s  -> diffUTCTime (_tickInfo_lastUTC tickInfo) s
+        ) (current mStartTime) tick
+  holdDyn 0 elapsed
 
 tickLossyFrom'' :: ( PerformEvent t m
                    , MonadIO (Performable m)
