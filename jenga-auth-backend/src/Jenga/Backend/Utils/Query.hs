@@ -26,6 +26,19 @@ import qualified Data.Text as T
 exec_ :: String -> Pg ()
 exec_ = void . execute_ . Query . T.encodeUtf8 . T.pack
 
+-- | Check if the database has no public tables (brand new / fresh)
+isFreshDb :: Pg Bool
+isFreshDb = do
+  [Only tableCount] <- query_ "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'"
+  pure (tableCount == (0 :: Int))
+
+-- | Run a Pg action only if a specific table exists in the public schema
+whenTableExists :: String -> Pg () -> Pg ()
+whenTableExists tbl action = do
+  [Only tableExists] <- query_ $ Query $ T.encodeUtf8 $ T.pack $
+    "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '" <> tbl <> "')"
+  when tableExists action
+
 runDb :: MonadIO m => Pool Connection -> Pg a -> m a
 runDb pool a = liftIO $ withResource pool $ \conn ->
   withTransactionSerializable conn $ runBeamPostgres conn a
