@@ -1,4 +1,4 @@
-module Jenga.Backend.Handlers.Auth.OrgBased.Invite where
+module Jenga.Backend.Handlers.Auth.Invite where
 
 import Jenga.Backend.Handlers.Auth.UserSignup (userSignupHandler)
 import Jenga.Backend.Utils.HasConfig
@@ -37,7 +37,7 @@ inviteHandler
      , HasConfig cfg AdminEmail
      , HasJengaTable Postgres db Account
      , HasJengaTable Postgres db UserTypeTable
-     , HasJengaTable Postgres db OrganizationEmails
+     , HasJengaTable Postgres db OrgOwnedUsers
      , HasJengaTable Postgres db SendEmailTask
      , HasJsonNotifyTbl be SendEmailTask n
 

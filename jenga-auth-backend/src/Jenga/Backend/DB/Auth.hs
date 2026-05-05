@@ -8,6 +8,8 @@ tables
 import Jenga.Backend.Utils.HasTable
 import Jenga.Backend.DB.Instances ()
 import Jenga.Common.Auth
+import Jenga.Common.Company
+import Jenga.Common.Errors
 import Jenga.Common.Schema
 import Jenga.Common.OAuth
 import Jenga.Common.BeamExtras
@@ -56,33 +58,36 @@ getUserByEmail acctTbl email = runSelectReturningOne $ select $ do
   pure accts
 
 
--- | This is tightly coupled to Auth in terms of admin user relations
+-- | Look up a user by email, verifying they belong to the same company as the admin
 getUserByEmailInOrg
   :: Database Postgres db
   => PgTable Postgres db Account
   -> PgTable Postgres db UserTypeTable
-  -> PgTable Postgres db OrganizationEmails
+  -> PgTable Postgres db OrgOwnedUsers
   -> Id Account
   -> T.Text
   -> Pg (Maybe (Account Identity))
-getUserByEmailInOrg acctTbl uTypeTbl orgEmailsTbl aid email = runSelectReturningOne $ select $ do
-  uType <- filter_ (\u -> _userType_acctID u ==. (val_ $ acctIDtoInt64 aid)) $ all_ $ uTypeTbl
-  let orgName = _userType_companyID uType
-  accessibleEmail <- filter_
-    (\emailRelation ->
-        (just_ . _validEmails_organizationFrom $ emailRelation) ==. orgName
-        &&.
-        (_validEmails_email emailRelation ==. (val_ email))
-    )  $ all_ $ orgEmailsTbl
-  filter_ (\acct -> _account_email acct ==. _validEmails_email accessibleEmail) $ all_ $ acctTbl
+getUserByEmailInOrg acctTbl uTypeTbl orgUsersTbl aid email = runSelectReturningOne $ select $ do
+  -- Get admin's company
+  uType <- filter_ (\u -> _userType_acctID u ==. (val_ $ acctIDtoInt64 aid)) $ all_ uTypeTbl
+  let CompanyInfoId mCompanyId = _userType_companyID uType
+  -- Find target account by email
+  targetAcct <- filter_ (\a -> _account_email a ==. val_ email) $ all_ acctTbl
+  -- Verify target is owned by admin's company
+  orgUser <- filter_ (\ou ->
+        _orgOwnedUsers_accountId ou ==. primaryKey targetAcct
+    ) $ all_ orgUsersTbl
+  let CompanyInfoId ouCompanyId = _orgOwnedUsers_companyId orgUser
+  guard_ $ just_ ouCompanyId ==. mCompanyId
+  pure targetAcct
 
--- | Nothing -> Self ; Just _ -> Admin
-putNewUserType :: Database Postgres db => PgTable Postgres db UserTypeTable -> Id Account -> Maybe OrgName -> Pg ()
+-- | Nothing -> Self ; Just companyId -> Admin
+putNewUserType :: Database Postgres db => PgTable Postgres db UserTypeTable -> Id Account -> Maybe (PrimaryKey CompanyInfo Identity) -> Pg ()
 putNewUserType uTypeTbl (AccountId (SqlSerial i)) = \case
-  Just orgName -> runInsert $ insert uTypeTbl $ insertExpressions
-    [ UserTypeTable (val_ i) (val_ Admin) (val_ $ Just orgName) ]
+  Just (CompanyInfoId cid) -> runInsert $ insert uTypeTbl $ insertExpressions
+    [ UserTypeTable (val_ i) (val_ Admin) (CompanyInfoId $ val_ $ Just cid) ]
   Nothing -> runInsert $ insert uTypeTbl $ insertExpressions
-    [ UserTypeTable (val_ i) (val_ Self) (val_ $ Nothing) ]
+    [ UserTypeTable (val_ i) (val_ Self) (CompanyInfoId $ val_ Nothing) ]
 
 getUserType :: Database Postgres db => PgTable Postgres db UserTypeTable -> Id Account -> Pg (Maybe UserType)
 getUserType uTypeTbl acctId = do
@@ -107,7 +112,7 @@ resetPassword'
   -> Id Account
   -> UTCTime
   -> T.Text
-  -> Pg (Either T.Text (PrimaryKey Account Identity))
+  -> Pg (Either (BackendError ResetPasswordError) (PrimaryKey Account Identity))
 resetPassword' tbl aid t pw = do
   hash <- makePasswordHash pw
   resetPasswordHash' tbl aid t hash
@@ -118,18 +123,18 @@ resetPasswordHash'
   -> Id Account
   -> UTCTime
   -> BS.ByteString
-  -> Pg (Either T.Text (PrimaryKey Account Identity))
+  -> Pg (Either (BackendError ResetPasswordError) (PrimaryKey Account Identity))
 resetPasswordHash' accountTable aid nonce pwhash = do
   macc <- runSelectReturningOne $ lookup_ accountTable aid
   case macc of
-    Nothing -> return $ Left "No account found"
+    Nothing -> return $ Left $ BCritical CouldntRetrieveAccount
     Just a ->
       if _account_passwordResetNonce a == Just nonce
       then do
         setAccountPasswordHash accountTable aid pwhash
         return $ Right aid
       else do
-        return $ Left "No account found for this nonce"
+        return $ Left $ BUserError InvalidToken
 
 isEmptyPassword :: Database Postgres db => PgTable Postgres db Account -> Id Account -> Pg Bool
 isEmptyPassword acctTbl accountID = f >>= \case
@@ -149,17 +154,21 @@ doesAccountExist accountTable email = do
   runSelectReturningOne $ select $ fmap primaryKey $ filter_ (\x ->
     lower_ (_account_email x) ==. lower_ (val_ email)) $ all_ accountTable
 
+data EnsureAccountError
+  = EnsureAccount_InsertReturnedUnexpectedRows Int
+  deriving (Eq, Show)
+
 -- | Only diff is no notification
 ensureAccountExists'
   :: (Database Postgres db)
   => PgTable Postgres db Account
   -> T.Text
-  -> Pg (Bool, Id Account)
+  -> Pg (Either EnsureAccountError (Bool, Id Account))
 ensureAccountExists' accountTable email = do
   existingAccountId <- runSelectReturningOne $ select $ fmap primaryKey $ filter_ (\x ->
     lower_ (_account_email x) ==. lower_ (val_ email)) $ all_ accountTable
   case existingAccountId of
-    Just existing -> return (False, existing)
+    Just existing -> return $ Right (False, existing)
     Nothing -> do
       results <- runInsertReturningList $ insert accountTable $ insertExpressions
         [ Account
@@ -172,8 +181,8 @@ ensureAccountExists' accountTable email = do
       case results of
         [acc] -> do
           let aid = primaryKey acc
-          pure (True, aid)
-        _ -> error "ensureAccountExists: Creating account failed"
+          pure $ Right (True, aid)
+        other -> pure $ Left $ EnsureAccount_InsertReturnedUnexpectedRows (length other)
 
 -- | This only exists cuz we'd rather ensure the SideEffect of creating a subscription works first and want to
 -- | avoid cases where a server fault happens despite a charge being created

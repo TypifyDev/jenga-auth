@@ -6,6 +6,7 @@ import Jenga.Backend.Utils.Query
 import Jenga.Backend.Utils.HasConfig
 import Jenga.Backend.Utils.HasTable
 import Jenga.Backend.Utils.Email
+import Jenga.Backend.Utils.Cookies (addAuthCookieHeader)
 import Jenga.Common.Schema
 import Jenga.Common.BeamExtras
 import Jenga.Common.Errors
@@ -15,6 +16,7 @@ import Rhyolite.Account
 import Database.Beam.Schema
 import Database.Beam.Postgres
 
+import qualified Snap
 import Network.Mail.Mime
 import Data.Pool
 import Web.ClientSession as CS
@@ -29,9 +31,12 @@ import qualified Data.Text as T
 resetPasswordHandler
   :: forall db cfg x m n.
      ( MonadIO m
+     , Snap.MonadSnap m
      , Database Postgres db
      , HasConfig cfg AdminEmail
      , HasConfig cfg CS.Key
+     , HasConfig cfg DomainOption
+     , HasConfig cfg AuthCookieName
      , HasConfig cfg (Pool Connection)
      , HasJengaTable Postgres db SendEmailTask
      , HasJengaTable Postgres db UserTypeTable
@@ -56,9 +61,7 @@ resetPasswordHandler (signedToken, newPass) chooseWelcomeLetter = do
         userType <- getUserType uTypeTbl accountID
         pure (resetPass, accountOld, userType)
       case rsetPass of
-        Left e -> do
-          liftIO $ print $ "Unknown Error on reset password" <> e
-          pure $ Left . BCritical $ Unknown e
+        Left e -> pure $ Left e
         Right aid -> case acct of
           Nothing -> pure . Left . BCritical $ CouldntRetrieveAccount
           Just acct' -> do
@@ -78,6 +81,8 @@ resetPasswordHandler (signedToken, newPass) chooseWelcomeLetter = do
                 newMkEmailHtml @db [to] (chooseWelcomeLetter uType passwordState) >>= \case
                   Left _ -> pure . Left . BCritical $ Reset_NoEmailSent
                   Right () -> do
+                    authCookieName <- getAuthCookieName <$> asksM
+                    addAuthCookieHeader authCookieName aid
                     signed <- liftIO $ signWithKey csk ( aid )
                     pure $ Right (signed, uType)
 

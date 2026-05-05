@@ -12,6 +12,7 @@
 module Jenga.Common.Auth where
 
 import Jenga.Common.Errors
+import Jenga.Common.Company
 import Jenga.Common.BeamExtras
 
 import Web.Stripe.Error
@@ -38,8 +39,8 @@ data ClientType = Mobile | Web deriving (Show, Read)
 
 -- | Transient type for ensuring necessary relations exist on creating an Account
 data IsUserType
-  = IsCompany OrgName
-  | IsGroupUser EmailAddress OrgName
+  = IsCompany (PrimaryKey CompanyInfo Identity)
+  | IsGroupUser EmailAddress (PrimaryKey CompanyInfo Identity)
   | IsSelf
   -- most of the time, this means they are a direct subscriber
   -- or the service is free
@@ -100,6 +101,7 @@ instance SpecificError (BackendError NoFreeTrialCode)
 instance SpecificError (BackendError AdminSignupError)
 instance SpecificError (BackendError InviteError)
 instance SpecificError (BackendError UnsubscribeError)
+instance SpecificError (BackendError OAuthError)
 instance SpecificError (BackendError UserSignupError)
 
 -- | TODO: we currently have zero actual support for creating a
@@ -159,17 +161,35 @@ instance ShowUser RedeemLinkError where
   showUser InvalidEmail_RedeemLink = "Invalid email"
   showUser (RedeemLink_Signup serr) = "While redeeming link: " <> showUser serr
 
+data AddUserOutcome
+  = AddUser_Added T.Text
+  | AddUser_Skipped T.Text
+  | AddUser_Failed T.Text
+  deriving (Show, Eq, Generic)
+instance ToJSON AddUserOutcome
+instance FromJSON AddUserOutcome
+
+data AddUsersResult = AddUsersResult
+  { _addUsersResult_added :: Int
+  , _addUsersResult_skipped :: [T.Text]
+  , _addUsersResult_failed :: [T.Text]
+  } deriving (Show, Eq, Generic)
+instance ToJSON AddUsersResult
+instance FromJSON AddUsersResult
+
 data AddUsersError
   = NoCommas
-  | InvalidEmail_AddUser
+  | NoUsersGiven
+  | InvalidEmail_AddUser [T.Text]
   | NoOrgCode T.Text
   | AddUser_Signup UserSignupError
   deriving (Show, Eq, Generic)
 instance ToJSON AddUsersError
 instance FromJSON AddUsersError
 instance ShowUser AddUsersError where
-  showUser NoCommas = "Error reading list, please ensure all emails are separated by commas"
-  showUser InvalidEmail_AddUser = "Invalid email in list"
+  showUser NoCommas = "Error reading list, please ensure all emails are separated by commas or newlines"
+  showUser NoUsersGiven = "No users given"
+  showUser (InvalidEmail_AddUser badEmails) = "Invalid emails: " <> T.intercalate ", " badEmails
   showUser (NoOrgCode _) = "No organization code found"
   showUser (AddUser_Signup serr) = showUser serr
 
@@ -190,6 +210,7 @@ data UserSignupError
   | BadSignupEmail
   | NoEmailSent
   | NoLinkedOrganization
+  | AccountInsertFailed Int
   deriving (Eq,Show,Generic)
 instance ToJSON UserSignupError
 instance FromJSON UserSignupError
@@ -199,6 +220,7 @@ instance ShowUser UserSignupError where
   showUser BadSignupEmail = "Please provide a valid email"
   showUser NoEmailSent = "We could not send email"
   showUser NoLinkedOrganization = "You seem to be joining under an organization that doesn't exist"
+  showUser (AccountInsertFailed n) = "Account creation failed: insert returned " <> T.pack (show n) <> " rows instead of 1"
 
 data UnsubscribeError = EmailNotFound deriving (Show,Eq,Generic)
 instance FromJSON UnsubscribeError
@@ -273,12 +295,14 @@ instance ShowUser NoFreeTrialCode where
 data AdminSignupError
   = AdminSignupError UserSignupError
   | InvalidAdminCode
+  | CompanyCreationFailed
   deriving (Eq,Show,Generic)
 instance ToJSON AdminSignupError
 instance FromJSON AdminSignupError
 instance ShowUser AdminSignupError where
   showUser InvalidAdminCode = "invalid code, please ask lauren@aceinterviewprep.io for this code"
   showUser (AdminSignupError e) = "For Admin User: " <> showUser e
+  showUser CompanyCreationFailed = "Failed to create company record"
 
 data CancelSubError
   = NoSubOrAccount
@@ -296,6 +320,20 @@ instance ShowUser CancelSubError where
   showUser NoSubscriptionExists = "No subscription found. Your subscription is likely canceled"
   showUser (StripeCouldntCancel e) = errorMsg e
 
+
+data OAuthError
+  = InvalidOAuthEmail T.Text
+  | AccountCreationFailed
+  | NoAuthorizationCode
+  | ProviderUserInfoFailed T.Text
+  deriving (Eq,Show,Generic)
+instance FromJSON OAuthError
+instance ToJSON OAuthError
+instance ShowUser OAuthError where
+  showUser (InvalidOAuthEmail provider) = "Invalid email received from " <> provider
+  showUser AccountCreationFailed = "Failed to create account"
+  showUser NoAuthorizationCode = "No authorization code received from provider"
+  showUser (ProviderUserInfoFailed provider) = "Failed to get user info from " <> provider
 
 data LoginError
   = UnrecognizedEmail T.Text

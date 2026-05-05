@@ -101,7 +101,7 @@ library
     Jenga.Backend.Handlers.Auth.UserSignup
     Jenga.Backend.Handlers.Auth.OrgBased.AddUsers
     Jenga.Backend.Handlers.Auth.OrgBased.AdminSignup
-    Jenga.Backend.Handlers.Auth.OrgBased.Invite
+    Jenga.Backend.Handlers.Auth.Invite
     Jenga.Backend.Handlers.Auth.OrgBased.RedeemLink
 
     Jenga.Backend.Handlers.Auth.Subscriptions.CancelSubscription

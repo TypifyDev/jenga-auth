@@ -33,6 +33,7 @@ library
         Jenga.Common.Auth
         Jenga.Common.OAuth
         Jenga.Common.BeamExtras
+        Jenga.Common.Company
         Jenga.Common.Schema
         Jenga.Common.Cookie
         Jenga.Common.Errors

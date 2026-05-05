@@ -45,7 +45,7 @@ type AddUsersConstraint db beR cfg be m n frontendRoute =
      , HasConfig cfg BaseURL
      , HasJengaTable Postgres db Account
      , HasJengaTable Postgres db UserTypeTable
-     , HasJengaTable Postgres db OrganizationEmails
+     , HasJengaTable Postgres db OrgOwnedUsers
      , HasJengaTable Postgres db SendEmailTask
      )
 
@@ -63,7 +63,7 @@ addUsersHandler
      , HasConfig cfg BaseURL
      , HasJengaTable Postgres db Account
      , HasJengaTable Postgres db UserTypeTable
-     , HasJengaTable Postgres db OrganizationEmails
+     , HasJengaTable Postgres db OrgOwnedUsers
      , HasJengaTable Postgres db SendEmailTask
      )
   => Id Account
@@ -71,7 +71,7 @@ addUsersHandler
   -> frontendRoute (Signed PasswordResetToken)
   -> (Link -> MkEmail x)
   -- ^ Email to send user
-  -> ReaderT cfg m (Either (BackendError AddUsersError) ())
+  -> ReaderT cfg m (Either (BackendError AddUsersError) AddUsersResult)
 addUsersHandler acctID emails resetRoute mkEmail = do
   (uTypeTbl :: PgTable Postgres db UserTypeTable) <- asksTableM
   case sepByCommas emails of
@@ -79,20 +79,33 @@ addUsersHandler acctID emails resetRoute mkEmail = do
     Right rawEmails -> do
       setTimeout $ length rawEmails + 10
       liftIO $ print rawEmails
-      case sequenceA $ fmap (validate . T.encodeUtf8 . T.pack) rawEmails of
-        Left _ -> pure $ Left . BUserError $ InvalidEmail_AddUser -- "Invalid email in list"
-        Right emails' -> do
-          results <- forM emails' $ \email -> do
-            mOrgName <- withDbEnv $ getOrgName uTypeTbl acctID
-            case mOrgName of
-              Nothing -> pure $ Left . BUserError $ NoOrgCode $ T.pack . show $ acctID --"No organization code found"
-              Just orgName -> do
-                createNewAccountWithSetupEmail @db @beR email (IsGroupUser email orgName) resetRoute mkEmail >>= \case
-                  Left bError -> pure $ Left $ AddUser_Signup <$> bError
-                  Right a -> pure $ Right a
-          pure $ () <$ sequenceA results
+      let trimmedEmails = filter (not . null) $ fmap (T.unpack . T.strip . T.pack) rawEmails
+      case trimmedEmails of
+        [] -> pure $ Left . BUserError $ NoUsersGiven
+        _ -> do
+          let validated = fmap (\e -> (T.pack e, validate . T.encodeUtf8 . T.pack $ e)) trimmedEmails
+              badEmails = [raw | (raw, Left _) <- validated]
+              goodEmails = [addr | (_, Right addr) <- validated]
+          case badEmails of
+            (_:_) -> pure $ Left . BUserError $ InvalidEmail_AddUser badEmails
+            [] -> do
+              mCompanyId <- withDbEnv $ getCompanyId uTypeTbl acctID
+              case mCompanyId of
+                Nothing -> pure $ Left . BUserError $ NoOrgCode $ T.pack . show $ acctID
+                Just companyId -> do
+                  results <- forM goodEmails $ \email -> do
+                    let emailText = T.decodeUtf8 . toByteString $ email
+                    createNewAccountWithSetupEmail @db @beR email (IsGroupUser email companyId) resetRoute mkEmail >>= \case
+                      Right _ -> pure (AddUser_Added emailText)
+                      Left bErr -> case bErr of
+                        BUserError AccountExists -> pure (AddUser_Skipped emailText)
+                        _ -> pure (AddUser_Failed emailText)
+                  let added = [e | AddUser_Added e <- results]
+                      skipped = [e | AddUser_Skipped e <- results]
+                      failed = [e | AddUser_Failed e <- results]
+                  pure $ Right $ AddUsersResult (length added) skipped failed
 
 sepByCommas :: T.Text -> Either ParseError [String]
 sepByCommas = parse p ""
   where
-    p = sepBy (some $ noneOf [',']) (char ',')
+    p = sepBy (some $ noneOf [',', '\n', '\r', ' ']) (skipMany1 $ oneOf [',', '\n', '\r', ' '])

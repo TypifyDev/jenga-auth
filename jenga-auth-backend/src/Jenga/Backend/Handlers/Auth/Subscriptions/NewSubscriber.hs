@@ -53,7 +53,7 @@ newSubscriberHandler
      , HasJengaTable Postgres db UserTypeTable
      , HasJengaTable Postgres db FreeTrial
      , HasJengaTable Postgres db StripeRelation
-     , HasJengaTable Postgres db OrganizationEmails
+     , HasJengaTable Postgres db OrgOwnedUsers
      , HasJengaTable Postgres db SendEmailTask
      , HasJsonNotifyTbl be SendEmailTask n
      )
@@ -67,7 +67,7 @@ newSubscriberHandler acctID form resetRoute = do
   (uTypeTbl :: PgTable Postgres db UserTypeTable) <- asksTableM
   (freeTrialTbl :: PgTable Postgres db FreeTrial) <- asksTableM
   (stripeTbl :: PgTable Postgres db StripeRelation) <- asksTableM
-  (orgTbl :: PgTable Postgres db OrganizationEmails) <- asksTableM
+  (orgTbl :: PgTable Postgres db OrgOwnedUsers) <- asksTableM
 
   email'_code <- withDbEnv $ do
     e <- getUsersEmail acctTbl acctID
@@ -110,15 +110,15 @@ newSubscriberHandler acctID form resetRoute = do
                       liftIO $ print plan
                       sevenDaysFromNow <- liftIO $ ((nominalDay * 7) `addUTCTime`) <$> getCurrentTime
                       let trialEnd = TrialEnd sevenDaysFromNow
-                      (isNew, aid) <- withDbEnv $ ensureAccountExists' acctTbl email
-                      -- let (AccountId (SqlSerial rawID)) = aid
-                      --reportLog False $ NewSubscription (fromIntegral rawID) email
-                      case isNew of
-                        False -> do
+                      eAccount <- withDbEnv $ ensureAccountExists' acctTbl email
+                      case eAccount of
+                        Left (EnsureAccount_InsertReturnedUnexpectedRows _) ->
+                          pure $ Left . BCritical $ MissingEmail
+                        Right (False, aid) -> do
                           mInfo <- withDbEnv $ getStripeInfo stripeTbl aid
                           case mInfo of
                             Nothing -> do
-                              withDbEnv $ isOrgEmail orgTbl email >>= \case
+                              withDbEnv $ isOrgOwnedUser orgTbl aid >>= \case
                                 False -> pure $ Left . BCritical $ NoAssociatedStripeInfo
                                 True -> pure $ Left . BUserError $ AlreadyInGroupSubscription
                             Just (StripeRelation _ _ subId) ->
@@ -134,7 +134,7 @@ newSubscriberHandler acctID form resetRoute = do
                                       withDbEnv $ do
                                         recordResubscribe stripeTbl aid (customerId customer) (subscriptionId sub)
                                       pure $ Right False
-                        True -> do
+                        Right (True, aid) -> do
                           mNonce <- withDbEnv $ do
                             putNewUserType uTypeTbl aid Nothing
                             newNonce acctTbl aid

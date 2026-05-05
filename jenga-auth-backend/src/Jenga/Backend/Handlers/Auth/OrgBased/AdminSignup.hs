@@ -5,12 +5,14 @@ import Jenga.Backend.Utils.HasConfig
 import Jenga.Backend.Utils.HasTable
 import Jenga.Backend.Utils.Email
 import Jenga.Common.Errors
+import Jenga.Common.Company
 import Jenga.Common.Schema
 import Jenga.Common.Auth
 
 import Network.Mail.Mime
 import Database.Beam
 import Database.Beam.Postgres
+import Database.Beam.Backend.SQL.BeamExtensions (runInsertReturningList)
 import Rhyolite.Account
 
 import Web.ClientSession as CS
@@ -18,6 +20,7 @@ import Data.Pool
 import Data.Signed
 import Control.Monad.Trans.Reader
 import Text.Email.Validate
+import Data.Maybe (listToMaybe)
 import qualified Data.Text.Encoding as T
 
 adminSignupHandler
@@ -32,7 +35,8 @@ adminSignupHandler
      , HasConfig cfg (FullRouteEncoder beR frontendRoute)
      , HasJengaTable Postgres db Account
      , HasJengaTable Postgres db UserTypeTable
-     , HasJengaTable Postgres db OrganizationEmails
+     , HasJengaTable Postgres db OrgOwnedUsers
+     , HasJengaTable Postgres db CompanyInfo
      , HasJengaTable Postgres db SendEmailTask
      , HasJsonNotifyTbl Postgres SendEmailTask n
      )
@@ -44,19 +48,26 @@ adminSignupHandler (NewCompanyEmail email orgName code) resetRoute mkEmail = do
   matchesCompanyCodeEnv code >>= \case
     False -> pure $ Left . BUserError $ InvalidAdminCode
     True -> do
-      createNewAccount @db @beR email (IsCompany orgName) resetRoute >>= \case
-        Left beErr -> pure $ Left $ fmap AdminSignupError $ beErr
-        Right link -> do
-          let
-            to = Address
-                 { addressName = Nothing
-                 , addressEmail = T.decodeUtf8 . toByteString $ email
-                 } -- recipients Address
-          eRes <- newMkEmailHtml @db [to] $ mkEmail link
-          case eRes of
-            Left _ -> pure $ Left . BCritical . AdminSignupError $ NoEmailSent
-            Right () -> do
-              pure $ Right ()
+      (companyTbl :: PgTable Postgres db CompanyInfo) <- asksTableM
+      mCompanyId <- withDbEnv $ do
+        results <- runInsertReturningList $ insert companyTbl $ insertExpressions
+          [ CompanyInfo default_ (val_ orgName) (val_ Nothing) (val_ Nothing) (val_ Nothing) (val_ Nothing) ]
+        pure $ primaryKey <$> listToMaybe results
+      case mCompanyId of
+        Nothing -> pure $ Left . BCritical $ CompanyCreationFailed
+        Just companyId ->
+          createNewAccount @db @beR email (IsCompany companyId) resetRoute >>= \case
+            Left beErr -> pure $ Left $ fmap AdminSignupError $ beErr
+            Right link -> do
+              let
+                to = Address
+                     { addressName = Nothing
+                     , addressEmail = T.decodeUtf8 . toByteString $ email
+                     }
+              eRes <- newMkEmailHtml @db [to] $ mkEmail link
+              case eRes of
+                Left _ -> pure $ Left . BCritical . AdminSignupError $ NoEmailSent
+                Right () -> pure $ Right ()
 
 --  do
 --                 Rfx.el "div" $ do

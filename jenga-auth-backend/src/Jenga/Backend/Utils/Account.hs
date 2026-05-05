@@ -39,7 +39,7 @@ createNewAccount
      , HasConfig cfg BaseURL
      , HasJengaTable Postgres db Account
      , HasJengaTable Postgres db UserTypeTable
-     , HasJengaTable Postgres db OrganizationEmails
+     , HasJengaTable Postgres db OrgOwnedUsers
      )
   => EmailAddress
   -> IsUserType
@@ -48,12 +48,13 @@ createNewAccount
 createNewAccount email isUserType resetRoute = do
   csk <- asksM
   (uTypeTbl :: PgTable Postgres db UserTypeTable) <- asksTableM
-  (orgTbl :: PgTable Postgres db OrganizationEmails) <- asksTableM
+  (orgTbl :: PgTable Postgres db OrgOwnedUsers) <- asksTableM
   (acctsTbl :: PgTable Postgres db Account) <- asksTableM
   (accountsTable :: PgTable Postgres db Account) <- asksTableM
   (withDbEnv $ ensureAccountExists' acctsTbl $ T.decodeUtf8 . toByteString $ email) >>= \case
-    (False, _) -> pure $ Left . BUserError $ AccountExists
-    (True, aid) -> do
+    Left (EnsureAccount_InsertReturnedUnexpectedRows n) -> pure $ Left . BCritical $ AccountInsertFailed n
+    Right (False, _) -> pure $ Left . BUserError $ AccountExists
+    Right (True, aid) -> do
       (withDbEnv $ putAccountRelations uTypeTbl orgTbl aid isUserType) >>= \case
         Left noOrgErr -> pure . Left . BCritical $ noOrgErr
         Right () -> do
@@ -76,7 +77,7 @@ createNewAccountWithSetupEmail
      , HasConfig cfg BaseURL
      , HasJengaTable Postgres db Account
      , HasJengaTable Postgres db UserTypeTable
-     , HasJengaTable Postgres db OrganizationEmails
+     , HasJengaTable Postgres db OrgOwnedUsers
      , HasJengaTable Postgres db SendEmailTask
      )
   => EmailAddress

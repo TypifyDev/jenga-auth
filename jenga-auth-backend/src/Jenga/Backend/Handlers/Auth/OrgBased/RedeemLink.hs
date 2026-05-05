@@ -34,7 +34,7 @@ redeemLinkHandler
      , HasJengaTable Postgres db InviteLink
      , HasJengaTable Postgres db Account
      , HasJengaTable Postgres db UserTypeTable
-     , HasJengaTable Postgres db OrganizationEmails
+     , HasJengaTable Postgres db OrgOwnedUsers
      , HasJengaTable Postgres db SendEmailTask
      , HasJsonNotifyTbl be SendEmailTask n
      )
@@ -47,13 +47,13 @@ redeemLinkHandler (codeLink, Email email) resetRoute mkEmail = do
 
   withDbEnv (getInviteLinkByCode inviteTbl codeLink) >>= \case
     Nothing -> pure $ Left . BUserError $ NoOrgCode_RedeemLink
-    Just (InviteLink orgName code' mNLeft)
-      | mNLeft == (Just 0) -> pure $ Left . BUserError $ CreditsDepleted orgName
+    Just (InviteLink companyId code' mNLeft)
+      | mNLeft == (Just 0) -> pure $ Left . BUserError $ CreditsDepleted (T.pack $ show companyId)
       | otherwise -> do
           case validate . T.encodeUtf8 $ email of
             Left _ -> pure $ Left . BUserError $ InvalidEmail_RedeemLink
             Right email' -> do
-              createNewAccountWithSetupEmail @db @beR email' (IsGroupUser email' orgName) resetRoute mkEmail >>= \case
+              createNewAccountWithSetupEmail @db @beR email' (IsGroupUser email' companyId) resetRoute mkEmail >>= \case
                 Left e -> pure $ Left $ RedeemLink_Signup <$> e
                 Right () -> do
                   case mNLeft of

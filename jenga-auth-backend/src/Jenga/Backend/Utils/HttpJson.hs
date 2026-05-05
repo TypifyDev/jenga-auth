@@ -135,6 +135,32 @@ withDependentPrivateJSONRequestResponse withF = do
   dependentPrivateRoute uTypeTbl authCookieName dbConn csk $ \userType acctId -> do
     withJSONRequestResponse @db (withF userType acctId)
 
+withAnyAuthStateJSONRequestResponse
+  :: forall db be a b err cfg m n
+  . ( FromJSON a
+    , ToJSON b
+    , ToJSON err
+    , Show err
+    , SpecificError (BackendError err)
+    , MonadSnap m
+    , Database Postgres db
+    , HasConfig cfg AdminEmail
+    , HasConfig cfg CS.Key
+    , HasConfig cfg AuthCookieName
+    , HasConfig cfg (Pool Connection)
+    , HasJengaTable Postgres db UserTypeTable
+    , HasJengaTable Postgres db LogItemRow
+    , HasJengaTable Postgres db SendEmailTask
+    , HasJsonNotifyTbl be SendEmailTask n
+    )
+  => (Maybe (Id Account) -> a -> ReaderT cfg m (Either (BackendError err) b))
+  -> ReaderT cfg m ()
+withAnyAuthStateJSONRequestResponse withF = do
+  eAcct <- getAccountIdFromCookies
+    :: ReaderT cfg m (Either (BackendError ()) AccountId)
+  let mAcct = either (const Nothing) Just eAcct
+  void $ withJSONRequestResponse @db (withF mAcct)
+
 -- | This function is meant to be completely independent of Authentication, so that it can be
 -- | wrapped by different auth schemes
 withJSONRequestResponse

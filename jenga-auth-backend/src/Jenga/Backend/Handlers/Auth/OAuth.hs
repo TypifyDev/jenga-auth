@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 module Jenga.Backend.Handlers.Auth.OAuth where
 
 import Jenga.Backend.DB.Auth
@@ -11,6 +12,7 @@ import Jenga.Backend.Utils.Cookies (addAuthCookieHeader, addUserTypeCookieHeader
 import Jenga.Common.Schema
 import Jenga.Common.OAuth
 import Jenga.Common.Auth
+import Jenga.Common.Errors
 import Jenga.Common.BeamExtras (Id)
 
 import Rhyolite.Account
@@ -57,17 +59,18 @@ handleOAuthLogin
      , HasJengaTable Postgres db UserTypeTable
      )
   => String  -- ^ Email from OAuth provider
+  -> T.Text  -- ^ Provider name for error messages
   -> Maybe oauthIdRow  -- ^ Existing OAuth ID row if user has logged in before
   -> (oauthIdRow -> Int64)  -- ^ Extract account ID from OAuth ID row
   -> (Id Account -> ReaderT cfg m ())  -- ^ Insert new OAuth ID for account
   -> R frontendRoute  -- ^ Where to redirect after success
-  -> ReaderT cfg m (Id Account)
-handleOAuthLogin emailStr maybeOAuthID extractAccountId insertOAuthId redirectToRoute = do
+  -> ReaderT cfg m (Either (BackendError OAuthError) (Id Account))
+handleOAuthLogin emailStr providerName maybeOAuthID extractAccountId insertOAuthId redirectToRoute = do
   -- Validate email format
   case EmailValidate.validate (T.encodeUtf8 $ T.pack emailStr) of
-    Left _err -> error $ "Invalid email format from OAuth provider: " <> emailStr
+    Left _err -> pure $ Left $ BCritical $ InvalidOAuthEmail providerName
     Right _validEmail -> do
-      accountID' <- case maybeOAuthID of
+      eAccountID <- case maybeOAuthID of
         Nothing -> do
           -- New user signup or link to existing account
           (acctsTbl :: PgTable Postgres db Account) <- asksTableM
@@ -80,25 +83,28 @@ handleOAuthLogin emailStr maybeOAuthID extractAccountId insertOAuthId redirectTo
             Just existingAcct -> do
               let existingAccountId = pk existingAcct
               insertOAuthId existingAccountId
-              pure existingAccountId
+              pure $ Right existingAccountId
             -- Create new account
             Nothing -> do
               accountID <- withDbEnv $ newAccount acctsTbl (Email $ T.pack emailStr) Nothing
               case accountID of
-                Nothing -> error "Insert new account failed"
+                Nothing -> pure $ Left $ BCritical AccountCreationFailed
                 Just aid -> do
                   insertOAuthId aid
                   -- Create user type for new OAuth user
                   (uTypeTbl :: PgTable Postgres db UserTypeTable) <- asksTableM
                   withDbEnv $ putNewUserType uTypeTbl aid Nothing
-                  pure aid
+                  pure $ Right aid
 
         Just oauthIdRow -> do
           -- Existing user login
-          pure $ AccountId $ SqlSerial $ extractAccountId oauthIdRow
+          pure $ Right $ AccountId $ SqlSerial $ extractAccountId oauthIdRow
 
-      setCookiesAndRedirect @db @beR accountID' redirectToRoute
-      pure accountID'
+      case eAccountID of
+        Left err -> pure $ Left err
+        Right accountID' -> do
+          setCookiesAndRedirect @db @beR accountID' redirectToRoute
+          pure $ Right accountID'
 
 -- | Helper function to set both auth and user type cookies after OAuth login
 setCookiesAndRedirect
@@ -172,10 +178,10 @@ oauthHandler
   -> beR (R OAuth)
   -> R frontendRoute
   -> R frontendRoute
-  -> ReaderT cfg m (Maybe (Id Account, T.Text))
+  -> ReaderT cfg m (Either (BackendError OAuthError) (Id Account, T.Text))
 oauthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case oauthRoute of
   OAuth_RedirectUri :/ redirectParams -> case redirectParams of
-    Nothing -> liftIO $ error "Expected to receive the authorization code here"
+    Nothing -> pure $ Left $ BCritical NoAuthorizationCode
     Just (RedirectUriParams code _mstate) -> do
       clientId <- getGithubOAuthClientID <$> asksM
       clientSecret <- getGithubOAuthClientSecret <$> asksM
@@ -199,7 +205,7 @@ oauthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case 
       case accessToken of
         Nothing -> do
           frontendRedirect @beR redirectNoAuth
-          pure Nothing
+          pure $ Left $ BUserError NoAuthorizationCode
         Just aToken -> do
           reqUser <- liftIO $ Http.parseRequest "https://api.github.com/user"
           let reqUser' = reqUser { Http.requestHeaders = Http.requestHeaders reqUser <>
@@ -210,7 +216,7 @@ oauthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case 
           res <- liftIO $ flip Http.httpLbs tlsMgr reqUser'
           let userGithub :: Maybe GitHubUser = Aeson.decode . Http.responseBody $ res
           case userGithub of
-            Nothing -> error "this is likely a bug or you do not have a github account"
+            Nothing -> pure $ Left $ BCritical $ ProviderUserInfoFailed "GitHub"
             Just userGH -> do
               ghEmail <- case _githubUser_github_email userGH of
                 Just email -> pure email
@@ -236,13 +242,14 @@ oauthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case 
 
               liftIO $ putStrLn ghEmail
               let ghDisplayName = T.pack $ fromMaybe (_githubUser_login userGH) (_githubUser_name userGH)
-              acctId <- handleOAuthLogin @db @beR
+              eAcctId <- handleOAuthLogin @db @beR
                 ghEmail
+                "GitHub"
                 maybeGitID
                 (\(GithubID _ghid uid) -> uid)
                 (\aid -> withDbEnv $ insertNewGithubID ghTbl userGH aid)
                 redirectToRoute
-              pure $ Just (acctId, ghDisplayName)
+              pure $ fmap (, ghDisplayName) eAcctId
 
 -- | Google OAuth handler
 googleOAuthHandler
@@ -266,10 +273,10 @@ googleOAuthHandler
   -> beR (R OAuth)
   -> R frontendRoute
   -> R frontendRoute
-  -> ReaderT cfg m (Maybe (Id Account, T.Text))
+  -> ReaderT cfg m (Either (BackendError OAuthError) (Id Account, T.Text))
 googleOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case oauthRoute of
   OAuth_RedirectUri :/ redirectParams -> case redirectParams of
-    Nothing -> liftIO $ error "Expected to receive the authorization code here"
+    Nothing -> pure $ Left $ BCritical NoAuthorizationCode
     Just (RedirectUriParams code _mstate) -> do
       clientId <- getGoogleOAuthClientID <$> asksM
       clientSecret <- getGoogleOAuthClientSecret <$> asksM
@@ -293,7 +300,7 @@ googleOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth =
       case accessToken of
         Nothing -> do
           frontendRedirect @beR redirectNoAuth
-          pure Nothing
+          pure $ Left $ BUserError NoAuthorizationCode
         Just aToken -> do
           reqUser <- liftIO $ Http.parseRequest "https://www.googleapis.com/oauth2/v2/userinfo"
           let reqUser' = reqUser { Http.requestHeaders = Http.requestHeaders reqUser <>
@@ -303,20 +310,21 @@ googleOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth =
           res <- liftIO $ flip Http.httpLbs tlsMgr reqUser'
           let userGoogle :: Maybe GoogleUser = Aeson.decode . Http.responseBody $ res
           case userGoogle of
-            Nothing -> error "Failed to get Google user info"
+            Nothing -> pure $ Left $ BCritical $ ProviderUserInfoFailed "Google"
             Just userG -> do
               (googleTbl :: PgTable Postgres db GoogleID) <- asksTableM
               maybeGoogleID <- withDbEnv $ getGoogleUserIfTheyExist googleTbl userG
 
               let googleEmail = _googleUser_email userG
                   googleDisplayName = T.pack $ fromMaybe (takeWhile (/= '@') googleEmail) (_googleUser_name userG)
-              acctId <- handleOAuthLogin @db @beR
+              eAcctId <- handleOAuthLogin @db @beR
                 googleEmail
+                "Google"
                 maybeGoogleID
                 (\(GoogleID _gid uid) -> uid)
                 (\aid -> withDbEnv $ insertNewGoogleID googleTbl userG aid)
                 redirectToRoute
-              pure $ Just (acctId, googleDisplayName)
+              pure $ fmap (, googleDisplayName) eAcctId
 
 -- | Discord OAuth handler
 discordOAuthHandler
@@ -340,10 +348,10 @@ discordOAuthHandler
   -> beR (R OAuth)
   -> R frontendRoute
   -> R frontendRoute
-  -> ReaderT cfg m (Maybe (Id Account, T.Text))
+  -> ReaderT cfg m (Either (BackendError OAuthError) (Id Account, T.Text))
 discordOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth = case oauthRoute of
   OAuth_RedirectUri :/ redirectParams -> case redirectParams of
-    Nothing -> liftIO $ error "Expected to receive the authorization code here"
+    Nothing -> pure $ Left $ BCritical NoAuthorizationCode
     Just (RedirectUriParams code _mstate) -> do
       clientId <- getDiscordOAuthClientID <$> asksM
       clientSecret <- getDiscordOAuthClientSecret <$> asksM
@@ -367,7 +375,7 @@ discordOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth 
       case accessToken of
         Nothing -> do
           frontendRedirect @beR redirectNoAuth
-          pure Nothing
+          pure $ Left $ BUserError NoAuthorizationCode
         Just aToken -> do
           reqUser <- liftIO $ Http.parseRequest "https://discord.com/api/users/@me"
           let reqUser' = reqUser { Http.requestHeaders = Http.requestHeaders reqUser <>
@@ -377,17 +385,18 @@ discordOAuthHandler oauthRoute oAuthRedirectGADT redirectToRoute redirectNoAuth 
           res <- liftIO $ flip Http.httpLbs tlsMgr reqUser'
           let userDiscord :: Maybe DiscordUser = Aeson.decode . Http.responseBody $ res
           case userDiscord of
-            Nothing -> error "Failed to get Discord user info"
+            Nothing -> pure $ Left $ BCritical $ ProviderUserInfoFailed "Discord"
             Just userD -> do
               (discordTbl :: PgTable Postgres db DiscordID) <- asksTableM
               maybeDiscordID <- withDbEnv $ getDiscordUserIfTheyExist discordTbl userD
 
               let discordEmail = fromMaybe (_discordUser_username userD) $ _discordUser_email userD
                   discordDisplayName = T.pack $ _discordUser_username userD
-              acctId <- handleOAuthLogin @db @beR
+              eAcctId <- handleOAuthLogin @db @beR
                 discordEmail
+                "Discord"
                 maybeDiscordID
                 (\(DiscordID _did uid) -> uid)
                 (\aid -> withDbEnv $ insertNewDiscordID discordTbl userD aid)
                 redirectToRoute
-              pure $ Just (acctId, discordDisplayName)
+              pure $ fmap (, discordDisplayName) eAcctId

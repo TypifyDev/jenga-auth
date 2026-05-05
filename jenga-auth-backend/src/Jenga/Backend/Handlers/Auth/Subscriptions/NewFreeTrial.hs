@@ -38,7 +38,7 @@ newFreeTrialHandler
      , HasConfig cfg BaseURL
      , HasJengaTable Postgres db Account
      , HasJengaTable Postgres db UserTypeTable
-     , HasJengaTable Postgres db OrganizationEmails
+     , HasJengaTable Postgres db OrgOwnedUsers
      , HasJengaTable Postgres db SendEmailTask
      , HasJengaTable Postgres db FreeTrial
      )
