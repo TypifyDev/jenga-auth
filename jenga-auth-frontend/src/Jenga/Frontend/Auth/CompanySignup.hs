@@ -81,13 +81,13 @@ newCompanySignup_FRP mkAPI (SignupData email' eConfirm' orgName' agree' submit) 
              if emailA /= emailB
              then Left "Emails dont match"
              else
-               case code' of
-                 Nothing -> Left "No organization code found, please get link from lauren@aceinterviewprep.io"
-                 Just code'' ->
-                   case EmailValidate.validate $ T.encodeUtf8 emailA of
-                     Left _ -> Left "Invalid Email"
-                     Right e ->
-                       Right $ NewCompanyEmail e orgName_ code''
+               -- Code is no longer required at the frontend; absent → "".
+               -- The backend handler stamps the correct value before
+               -- 'matchesCompanyCodeEnv' runs, so this is safe.
+               case EmailValidate.validate $ T.encodeUtf8 emailA of
+                 Left _ -> Left "Invalid Email"
+                 Right e ->
+                   Right $ NewCompanyEmail e orgName_ (maybe "" id code')
                )
     valid = fmap validate $ (,,,,) <$> email <*> eConfirm <*> orgName <*> agree <*> code
   let (bad, good') = fanEither (tag (current valid) submit)
