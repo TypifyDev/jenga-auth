@@ -24,9 +24,8 @@ module Jenga.Common.HasJengaConfig
   , getJsonConfig
   , renderFullRouteBE
   , renderFullRouteFE
-  , Link
   -- * Strong witness to the contained text being a valid link
-  , getLink
+  , Link(..)
   -- * Unwrap smart constructor
   , isLocalHostEnv
   , lookupSubscriptionCodeEnv
