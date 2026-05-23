@@ -33,6 +33,7 @@ instance Table CompanyInfo where
 deriving instance Show (CompanyInfo Identity)
 deriving instance Show (PrimaryKey CompanyInfo Identity)
 deriving instance Eq (PrimaryKey CompanyInfo Identity)
+deriving instance Ord (PrimaryKey CompanyInfo Identity)
 instance ToJSON (CompanyInfo Identity)
 instance FromJSON (CompanyInfo Identity)
 instance ToJSON (PrimaryKey CompanyInfo Identity)
