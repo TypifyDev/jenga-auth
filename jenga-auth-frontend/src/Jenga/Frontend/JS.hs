@@ -12,7 +12,7 @@ import Control.Lens ((^.))
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Fix
-import Control.Monad.Trans.Reader
+import Control.Monad.Reader
 import qualified Data.Text as T
 
 -- | Simplified interface to running JS and returning it as a wrapped value
@@ -85,10 +85,11 @@ clogSend
      , ToJSVal a
      , HasConfig cfg (FullRouteEncoder backendRoute fe)
      , HasConfig cfg BaseURL
+     , MonadReader cfg m
      )
   => R backendRoute
   -> a
-  -> ReaderT cfg m ()
+  -> m ()
 clogSend route a = do
   clog a
   logRoute <- renderFullRouteBE @fe route

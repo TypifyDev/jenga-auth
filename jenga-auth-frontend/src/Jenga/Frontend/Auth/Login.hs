@@ -21,7 +21,7 @@ import Reflex.Dom.Core
 import Control.Monad.Fix
 import qualified Data.Map as M
 import qualified Data.Text as T
-import Control.Monad.Trans.Reader
+import Control.Monad.Reader
 
 data LoginConfig t = LoginConfig
   { _loginConfig_errors :: Dynamic t (Maybe T.Text)
@@ -51,12 +51,13 @@ login_FRP ::
   --, Response m ~ Identity
   , HasConfig cfg (FullRouteEncoder backendRoute frontendRoute)
   , HasConfig cfg BaseURL
+  , MonadReader cfg m
   )
   => R backendRoute
   -> R frontendRoute
   -> R frontendRoute
   -> LoginData t m
-  -> ReaderT cfg m (LoginConfig t) -- (Event t (AuthToken, UserType))
+  -> m (LoginConfig t) -- (Event t (AuthToken, UserType))
 login_FRP loginRoute requestNewPasswordPageRoute signupRoute (LoginData user pass submit forgotPass goSignup) = do
   rec
     let credentials = tag (current $ (,) <$> value user <*> value pass) submit

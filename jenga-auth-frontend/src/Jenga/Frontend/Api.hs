@@ -10,8 +10,7 @@ import Obelisk.Configs
 import Obelisk.Route
 import Reflex.Dom.Core
 
-import Control.Monad.Trans.Reader
-import Control.Monad.Fix
+import Control.Monad.Reader
 import Data.Typeable
 import Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as Aeson
@@ -61,10 +60,11 @@ runAPI
      , DomBuilder t m
      , HasConfig cfg (FullRouteEncoder backendRoute fe)
      , HasConfig cfg BaseURL
+     , MonadReader cfg m
      )
   => R backendRoute
   -> Event t toJson
-  -> ReaderT cfg m (Event t (RequestError err), Event t fromJson)
+  -> m (Event t (RequestError err), Event t fromJson)
 runAPI route evPayload = runAPIWithHeaders @fe route mempty evPayload
 
 -- | Generic Req -> Response function
@@ -81,14 +81,16 @@ runAPIWithHeaders
      , DomBuilder t m
      , HasConfig cfg (FullRouteEncoder backendRoute fe)
      , HasConfig cfg BaseURL
+     , MonadReader cfg m
      )
   => R backendRoute
   -> Map.Map T.Text T.Text
   -> Event t toJson
-  -> ReaderT cfg m (Event t (RequestError err), Event t fromJson)
+  -> m (Event t (RequestError err), Event t fromJson)
 runAPIWithHeaders route headers evPayload = do
+  cfg <- ask
   fmap fanResponse' $ runRequest $
-    performJSONRequestResponseAnnotatedWithHeaders @fe route headers evPayload
+    flip runReaderT cfg $ performJSONRequestResponseAnnotatedWithHeaders @fe route headers evPayload
 
 -- | Mutually exclusive to when you would use runAPIResponseGated
 runAPIPostBuild
@@ -104,10 +106,11 @@ runAPIPostBuild
      , DomBuilder t m
      , HasConfig cfg (FullRouteEncoder backendRoute fe)
      , HasConfig cfg BaseURL
+     , MonadReader cfg m
      )
   => R backendRoute
   -> (Event t () -> Event t toJson)
-  -> ReaderT cfg m (Event t (RequestError err), Event t fromJson)
+  -> m (Event t (RequestError err), Event t fromJson)
 runAPIPostBuild route withPb = runAPIPostBuildWithHeaders @fe route mempty withPb
   -- do
   -- fmap fanResponse' $ runRequest' $ performWithPb
@@ -129,13 +132,15 @@ runAPIPostBuildWithHeaders
      , DomBuilder t m
      , HasConfig cfg (FullRouteEncoder backendRoute fe)
      , HasConfig cfg BaseURL
+     , MonadReader cfg m
      )
   => R backendRoute
   -> Map.Map T.Text T.Text
   -> (Event t () -> Event t toJson)
-  -> ReaderT cfg m (Event t (RequestError err), Event t fromJson)
+  -> m (Event t (RequestError err), Event t fromJson)
 runAPIPostBuildWithHeaders route headers withPb = do
-  fmap fanResponse' $ runRequest' $ performWithPb
+  cfg <- ask
+  fmap fanResponse' $ runRequest' $ \pb -> flip runReaderT cfg (performWithPb pb)
   where
     runRequest' req = fmap switchDyn $ prerender (pure never) $ getPostBuild >>= req
     performWithPb = performJSONRequestResponseAnnotatedWithHeaders @fe route headers . withPb
@@ -157,10 +162,11 @@ runAPIResponseGated
      , MonadFix m
      , HasConfig cfg (FullRouteEncoder backendRoute fe)
      , HasConfig cfg BaseURL
+     , MonadReader cfg m
      )
   => R backendRoute
   -> Event t toJson
-  -> ReaderT cfg m (Event t (RequestError err), Event t fromJson)
+  -> m (Event t (RequestError err), Event t fromJson)
 runAPIResponseGated route evPayload = mdo
   shouldFire <- holdDyn True $ leftmost [ False <$ evPayload , True <$ res, True <$ err ]
   (err, res) <- runAPI @fe route $ gate (current shouldFire ) evPayload
@@ -177,11 +183,12 @@ performJSONRequestResponse
      , FromJSON fromJson
      , HasConfig cfg (FullRouteEncoder backendRoute fe)
      , HasConfig cfg BaseURL
+     , MonadReader cfg m
 
      )
   => R backendRoute
   -> Event t toJson
-  -> ReaderT cfg m (Event t (Either ErrorRead fromJson))
+  -> m (Event t (Either ErrorRead fromJson))
 performJSONRequestResponse route jsonEv = do
   (fmap . fmap) decodeXhrResponse' $ performJSONRequest @fe route jsonEv
 
@@ -200,10 +207,11 @@ performJSONRequestResponseAnnotated
      , Typeable fromJson
      , HasConfig cfg (FullRouteEncoder backendRoute fe)
      , HasConfig cfg BaseURL
+     , MonadReader cfg m
      )
   => R backendRoute
   -> Event t toJson
-  -> ReaderT cfg m (Event t (Either T.Text fromJson))
+  -> m (Event t (Either T.Text fromJson))
 performJSONRequestResponseAnnotated route jsonEv =
   performJSONRequestResponseAnnotatedWithHeaders @fe route mempty jsonEv
   -- do
@@ -224,11 +232,12 @@ performJSONRequestResponseAnnotatedWithHeaders
      , Typeable fromJson
      , HasConfig cfg (FullRouteEncoder backendRoute fe)
      , HasConfig cfg BaseURL
+     , MonadReader cfg m
      )
   => R backendRoute
   -> Map.Map T.Text T.Text
   -> Event t toJson
-  -> ReaderT cfg m (Event t (Either T.Text fromJson))
+  -> m (Event t (Either T.Text fromJson))
 performJSONRequestResponseAnnotatedWithHeaders route headers jsonEv = do
   evXhrResponse :: Event t XhrResponse <- performJSONRequestWithHeaders @fe route headers jsonEv
   routeLink <- renderFullRouteBE @fe route
@@ -308,11 +317,12 @@ performJSONRequestWithHeaders
      , HasConfigs m
      , HasConfig cfg (FullRouteEncoder backendRoute fe)
      , HasConfig cfg BaseURL
+     , MonadReader cfg m
      )
   => R backendRoute
   -> Map.Map T.Text T.Text
   -> Event t json
-  -> ReaderT cfg m (Event t XhrResponse)
+  -> m (Event t XhrResponse)
 performJSONRequestWithHeaders route headers jsonEv = do
   routeText <- (renderFullRouteBE @fe route)
   performRequestAsync $ withHeaders headers . withCred . postJson (getLink routeText) <$> jsonEv
@@ -327,10 +337,11 @@ performJSONRequest
      , HasConfigs m
      , HasConfig cfg (FullRouteEncoder backendRoute fe)
      , HasConfig cfg BaseURL
+     , MonadReader cfg m
      )
   => R backendRoute
   -> Event t json
-  -> ReaderT cfg m (Event t XhrResponse)
+  -> m (Event t XhrResponse)
 performJSONRequest route jsonEv = do
   routeText <- (renderFullRouteBE @fe route)
   performRequestAsync $ withCred <$> postJson (getLink routeText) <$> jsonEv

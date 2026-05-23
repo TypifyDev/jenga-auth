@@ -15,7 +15,7 @@ import Jenga.Common.Errors
 import Templates.Types
 
 import Control.Monad.Fix
-import Control.Monad.Trans.Reader
+import Control.Monad.Reader
 import Data.Functor.Identity
 import Data.Signed (Signed)
 import qualified Data.Text as T
@@ -88,10 +88,11 @@ resetPassword_FRP ::
   , Response m ~ Identity
   , HasConfig cfg (FullRouteEncoder backendRoute frontendRoute)
   , HasConfig cfg BaseURL
+  , MonadReader cfg m
   )
   => R backendRoute
   -> ( ResetPasswordData t m )
-  -> ReaderT cfg m (ResetPasswordConfig t ) -- Event t (AuthToken, UserType))
+  -> m (ResetPasswordConfig t ) -- Event t (AuthToken, UserType))
 resetPassword_FRP routeReset (ResetPasswordData pass conf submit) = do
   token <- askRoute
   rec
