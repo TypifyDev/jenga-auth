@@ -38,6 +38,7 @@ library
                , mime-mail-orphans
                , mmark
                , mmark-ext
+               , mtl
                , network-uri
                , obelisk-route
                , obelisk-oauth-common

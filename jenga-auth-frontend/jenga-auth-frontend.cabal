@@ -38,6 +38,7 @@ library
                , jsaddle
                , jenga-auth-common
                , lens
+               , mtl
                , network-uri
                , obelisk-executable-config-lookup
                , obelisk-frontend
