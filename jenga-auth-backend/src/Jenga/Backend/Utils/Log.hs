@@ -60,7 +60,7 @@ reportLog
   -> ReaderT cfg m ()
 reportLog isUrgent item = do
   (logTbl :: PgTable Postgres db LogItemRow) <- asksTableM
-  withDbEnv $ do
+  withDbEnvQuiet $ do
     runInsert $ insert logTbl $ insertExpressions
       [ LogItemRow
         default_
